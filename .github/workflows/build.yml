@@ -1,13 +1,10 @@
-name: Build Windows and Android
+name: Build Mario64Source
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
-
-permissions:
-  contents: read
+  workflow_dispatch:
 
 jobs:
   windows:
@@ -17,33 +14,27 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - name: Set up MSYS2
+      - name: Install MSYS2 toolchain
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: >-
+            make
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-SDL2
-            mingw-w64-x86_64-SDL2_image
-            mingw-w64-x86_64-glew
-            git
-            make
-            python
       - name: Build Windows executable
         shell: msys2 {0}
         run: |
-          set -euo pipefail
           if [ ! -f Makefile ]; then
-            echo 'Missing Makefile: import the SM64 PC port source and build scripts first.' >&2
+            echo 'ERROR: Missing Makefile. Import a compatible Windows SM64 port first.' >&2
             exit 1
           fi
           make -j2
           mkdir -p dist/windows
-          find . -type f -name '*.exe' ! -path './dist/*' -exec cp {} dist/windows/ \;
-          test -n "$(find dist/windows -maxdepth 1 -name '*.exe' -print -quit)" || { echo 'Build completed but no EXE was produced.' >&2; exit 1; }
+          find . -type f -name '*.exe' -not -path './.git/*' -exec cp '{}' dist/windows/ \;
+          test -n "$(find dist/windows -maxdepth 1 -name '*.exe' -print -quit)" || { echo 'ERROR: No EXE produced.' >&2; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: Mario64Source-Windows
@@ -61,29 +52,36 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install Android NDK and build tools
+      - name: Configure Android SDK without legacy tools package
+        shell: bash
         run: |
-          sdkmanager --install 'ndk;27.2.12479018' 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.0'
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER=$(find "$SDK/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)
+          test -n "$SDKMANAGER" || { echo 'sdkmanager not found' >&2; exit 1; }
+          yes | "$SDKMANAGER" --sdk_root="$SDK" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK" 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018' 'cmake;3.22.1'
       - name: Build Android APK
         shell: bash
         run: |
           set -euo pipefail
-          if [ -f android/gradlew ]; then
-            chmod +x android/gradlew
-            (cd android && ./gradlew assembleDebug --no-daemon)
-          elif [ -f gradlew ]; then
+          if [ -f gradlew ]; then
             chmod +x gradlew
             ./gradlew assembleDebug --no-daemon
+          elif [ -f android/gradlew ]; then
+            cd android
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon
+            cd ..
           else
-            echo 'Missing Android Gradle project: integrate an Android-compatible SM64 port first.' >&2
+            echo 'ERROR: Missing Android Gradle project. Import an Android-compatible SM64 port first.' >&2
             exit 1
           fi
           mkdir -p dist/android
-          find . -type f -name '*.apk' ! -path './dist/*' -exec cp {} dist/android/ \;
-          test -n "$(find dist/android -maxdepth 1 -name '*.apk' -print -quit)" || { echo 'Build completed but no APK was produced.' >&2; exit 1; }
+          find . -path '*/build/outputs/apk/*' -name '*.apk' -type f -exec cp '{}' dist/android/ \;
+          test -n "$(find dist/android -maxdepth 1 -name '*.apk' -print -quit)" || { echo 'ERROR: No APK produced.' >&2; exit 1; }
       - uses: actions/upload-artifact@v4
         with:
           name: Mario64Source-Android
