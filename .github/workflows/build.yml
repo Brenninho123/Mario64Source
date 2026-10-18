@@ -1,139 +1,91 @@
-name: Mario64Source CI
+name: Build Windows and Android
 
 on:
   workflow_dispatch:
-    inputs:
-      target:
-        description: Which platform to build
-        required: true
-        type: choice
-        options:
-          - both
-          - windows
-          - android
-        default: both
   push:
-    paths:
-      - ".github/workflows/build.yml"
-      - "README.md"
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
   windows:
-    name: Windows x64 executable
-    if: github.event_name == 'push' || inputs.target == 'both' || inputs.target == 'windows'
+    name: Windows EXE
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - name: Set up MSYS2
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
+            mingw-w64-x86_64-glew
             git
             make
-            unzip
             python
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-glew
-            mingw-w64-x86_64-SDL2
-
-      - name: Download authorized base ROM
-        shell: pwsh
-        env:
-          BASEROM_DOWNLOAD_URL: ${{ secrets.BASEROM_DOWNLOAD_URL }}
-          BASEROM_DOWNLOAD_TOKEN: ${{ secrets.BASEROM_DOWNLOAD_TOKEN }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:BASEROM_DOWNLOAD_URL)) {
-            throw "Set BASEROM_DOWNLOAD_URL to a private, authorized direct-download URL."
-          }
-          $headers = @{}
-          if (-not [string]::IsNullOrWhiteSpace($env:BASEROM_DOWNLOAD_TOKEN)) {
-            $headers["Authorization"] = "Bearer $env:BASEROM_DOWNLOAD_TOKEN"
-          }
-          Invoke-WebRequest -Uri $env:BASEROM_DOWNLOAD_URL -Headers $headers -OutFile "$env:RUNNER_TEMP\baserom.us.z64"
-          if ((Get-Item "$env:RUNNER_TEMP\baserom.us.z64").Length -lt 1000000) {
-            throw "Downloaded file is too small. Check the URL and authentication."
-          }
-
-      - name: Clone source and place base ROM
-        run: |
-          git clone --depth 1 --branch nightly https://github.com/sm64pc/sm64ex.git upstream
-          cp "$RUNNER_TEMP/baserom.us.z64" upstream/baserom.us.z64
-
       - name: Build Windows executable
-        working-directory: upstream
-        run: make -j2
-
-      - name: Upload Windows build
-        uses: actions/upload-artifact@v4
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          if [ ! -f Makefile ]; then
+            echo 'Missing Makefile: import the SM64 PC port source and build scripts first.' >&2
+            exit 1
+          fi
+          make -j2
+          mkdir -p dist/windows
+          find . -type f -name '*.exe' ! -path './dist/*' -exec cp {} dist/windows/ \;
+          test -n "$(find dist/windows -maxdepth 1 -name '*.exe' -print -quit)" || { echo 'Build completed but no EXE was produced.' >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
         with:
-          name: mario64-windows-x64
-          path: |
-            upstream/build/us_pc/*.exe
-            upstream/build/us_pc/*.dll
-            upstream/res/**
+          name: Mario64Source-Windows
+          path: dist/windows/*.exe
           if-no-files-found: error
-          retention-days: 7
 
   android:
     name: Android APK
-    if: github.event_name == 'push' || inputs.target == 'both' || inputs.target == 'android'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
-      - name: Install build tools
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android NDK and build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git make python3 zip unzip clang build-essential openjdk-17-jdk
-          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
-
-      - name: Download authorized base ROM
-        env:
-          BASEROM_DOWNLOAD_URL: ${{ secrets.BASEROM_DOWNLOAD_URL }}
-          BASEROM_DOWNLOAD_TOKEN: ${{ secrets.BASEROM_DOWNLOAD_TOKEN }}
+          sdkmanager --install 'ndk;27.2.12479018' 'cmake;3.22.1' 'platforms;android-35' 'build-tools;35.0.0'
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Build Android APK
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${BASEROM_DOWNLOAD_URL:-}" ]; then
-            echo "::error::Set BASEROM_DOWNLOAD_URL to a private, authorized direct-download URL."
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
+            (cd android && ./gradlew assembleDebug --no-daemon)
+          elif [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --no-daemon
+          else
+            echo 'Missing Android Gradle project: integrate an Android-compatible SM64 port first.' >&2
             exit 1
           fi
-          if [ -n "${BASEROM_DOWNLOAD_TOKEN:-}" ]; then
-            curl --fail --location --retry 3 \
-              -H "Authorization: Bearer ${BASEROM_DOWNLOAD_TOKEN}" \
-              "$BASEROM_DOWNLOAD_URL" -o baserom.us.z64
-          else
-            curl --fail --location --retry 3 "$BASEROM_DOWNLOAD_URL" -o baserom.us.z64
-          fi
-          test "$(stat -c%s baserom.us.z64)" -gt 1000000
-
-      - name: Clone Android port and submodules
-        run: |
-          git clone --depth 1 --recursive https://github.com/VDavid003/sm64-port-android-base.git upstream
-          cp baserom.us.z64 upstream/app/jni/src/baserom.us.z64
-
-      - name: Download SDL sources
-        working-directory: upstream
-        run: |
-          chmod +x ./getSDL.sh
-          ./getSDL.sh
-
-      - name: Build native Android library
-        working-directory: upstream/app/jni/src
-        run: make --jobs 2
-
-      - name: Build APK
-        working-directory: upstream
-        run: ./gradlew assembleDebug
-
-      - name: Upload Android APK
-        uses: actions/upload-artifact@v4
+          mkdir -p dist/android
+          find . -type f -name '*.apk' ! -path './dist/*' -exec cp {} dist/android/ \;
+          test -n "$(find dist/android -maxdepth 1 -name '*.apk' -print -quit)" || { echo 'Build completed but no APK was produced.' >&2; exit 1; }
+      - uses: actions/upload-artifact@v4
         with:
-          name: mario64-android-apk
-          path: upstream/app/build/outputs/apk/debug/*.apk
+          name: Mario64Source-Android
+          path: dist/android/*.apk
           if-no-files-found: error
-          retention-days: 7
